@@ -3,15 +3,13 @@
 # Copyright 2017 Jacques-Etienne Baudoux <je@bcim.be>
 # Copyright 2021 Tecnativa - João Marques
 # License AGPL-3 - See http://www.gnu.org/licenses/agpl-3.0.html
-
-import odoo
 from odoo.exceptions import UserError
-from odoo.tests import Form
+from odoo.tests import Form, tagged
 
 from odoo.addons.sale.tests.common import TestSaleCommon
 
 
-@odoo.tests.tagged("-at_install", "post_install")
+@tagged("post_install", "-at_install")
 class TestStockPickingInvoiceLink(TestSaleCommon):
     def _update_product_qty(self, product):
 
@@ -93,7 +91,7 @@ class TestStockPickingInvoiceLink(TestSaleCommon):
         )
         pick_1 = self.so.picking_ids.filtered(
             lambda x: x.picking_type_code == "outgoing"
-            and x.state in ("confirmed", "assigned")
+            and x.state in ("confirmed", "assigned", "partially_available")
         )
         pick_1.move_line_ids.write({"qty_done": 1})
         pick_1._action_done()
@@ -118,7 +116,7 @@ class TestStockPickingInvoiceLink(TestSaleCommon):
 
         pick_2 = self.so.picking_ids.filtered(
             lambda x: x.picking_type_code == "outgoing"
-            and x.state in ("confirmed", "assigned")
+            and x.state in ("confirmed", "assigned", "partially_available")
         )
         pick_2.move_line_ids.write({"qty_done": 1})
         pick_2._action_done()
@@ -197,7 +195,7 @@ class TestStockPickingInvoiceLink(TestSaleCommon):
     def test_return_picking_to_refund(self):
         pick_1 = self.so.picking_ids.filtered(
             lambda x: x.picking_type_code == "outgoing"
-            and x.state in ("confirmed", "assigned")
+            and x.state in ("confirmed", "assigned", "partially_available")
         )
         pick_1.move_line_ids.write({"qty_done": 2})
         pick_1._action_done()
@@ -236,7 +234,7 @@ class TestStockPickingInvoiceLink(TestSaleCommon):
     def test_invoice_refund(self):
         pick_1 = self.so.picking_ids.filtered(
             lambda x: x.picking_type_code == "outgoing"
-            and x.state in ("confirmed", "assigned")
+            and x.state in ("confirmed", "assigned", "partially_available")
         )
         pick_1.move_line_ids.write({"qty_done": 2})
         pick_1._action_done()
@@ -249,7 +247,13 @@ class TestStockPickingInvoiceLink(TestSaleCommon):
         wiz_invoice_refund = (
             self.env["account.move.reversal"]
             .with_context(active_model="account.move", active_ids=inv.ids)
-            .create({"refund_method": "modify", "reason": "test"})
+            .create(
+                {
+                    "refund_method": "modify",
+                    "reason": "test",
+                    "journal_id": inv.journal_id.id,
+                }
+            )
         )
         wiz_invoice_refund.reverse_moves()
         new_invoice = self.so.invoice_ids.filtered(
@@ -282,7 +286,13 @@ class TestStockPickingInvoiceLink(TestSaleCommon):
         wiz_invoice_refund = (
             self.env["account.move.reversal"]
             .with_context(active_model="account.move", active_ids=inv.ids)
-            .create({"refund_method": "cancel", "reason": "test"})
+            .create(
+                {
+                    "refund_method": "cancel",
+                    "reason": "test",
+                    "journal_id": inv.journal_id.id,
+                }
+            )
         )
         wiz_invoice_refund.reverse_moves()
         # Create invoice again
@@ -290,71 +300,3 @@ class TestStockPickingInvoiceLink(TestSaleCommon):
         new_inv.action_post()
         # Assert that new invoice has related picking
         self.assertEqual(new_inv.picking_ids, pick_1)
-
-    def test_partial_invoice_full_link(self):
-        """Check that the partial invoices are linked to the stock
-        picking.
-        """
-        pick_1 = self.so.picking_ids.filtered(
-            lambda x: x.picking_type_code == "outgoing"
-            and x.state in ("confirmed", "assigned", "partially_available")
-        )
-        pick_1.move_line_ids.write({"qty_done": 2})
-        pick_1._action_done()
-        # Create invoice
-        inv = self.so._create_invoices()
-        with Form(inv) as move_form:
-            for i in range(len(move_form.invoice_line_ids)):
-                with move_form.invoice_line_ids.edit(i) as line_form:
-                    line_form.quantity = 1
-        inv.action_post()
-        self.assertEqual(inv.picking_ids, pick_1)
-        inv2 = self.so._create_invoices()
-        self.assertEqual(inv2.picking_ids, pick_1)
-
-    def test_return_and_invoice_refund(self):
-        pick_1 = self.so.picking_ids.filtered(
-            lambda x: x.picking_type_code == "outgoing"
-            and x.state in ("confirmed", "assigned", "partially_available")
-        )
-        pick_1.move_line_ids.write({"qty_done": 2})
-        pick_1._action_done()
-        # Create invoice
-        inv = self.so._create_invoices()
-        inv_line_prod_del = inv.invoice_line_ids.filtered(
-            lambda l: l.product_id == self.prod_del
-        )
-        inv.action_post()
-        self.assertEqual(
-            inv_line_prod_del.move_line_ids,
-            pick_1.move_lines.filtered(lambda m: m.product_id == self.prod_del),
-        )
-        # Create return picking
-        return_form = Form(self.env["stock.return.picking"])
-        return_form.picking_id = pick_1
-        return_wiz = return_form.save()
-        # Remove product ordered line
-        return_wiz.product_return_moves.filtered(
-            lambda l: l.product_id == self.prod_order
-        ).unlink()
-        return_wiz.product_return_moves.quantity = 1.0
-        return_wiz.product_return_moves.to_refund = True
-        res = return_wiz.create_returns()
-        return_pick = self.env["stock.picking"].browse(res["res_id"])
-        # Validate picking
-        return_pick.move_lines.quantity_done = 1.0
-        return_pick.button_validate()
-        wiz_invoice_refund = (
-            self.env["account.move.reversal"]
-            .with_context(active_model="account.move", active_ids=inv.ids)
-            .create({"refund_method": "cancel", "reason": "test"})
-        )
-        action = wiz_invoice_refund.reverse_moves()
-        invoice_refund = self.env["account.move"].browse(action["res_id"])
-        inv_line_prod_del_refund = invoice_refund.invoice_line_ids.filtered(
-            lambda l: l.product_id == self.prod_del
-        )
-        self.assertEqual(
-            inv_line_prod_del_refund.move_line_ids,
-            return_pick.move_lines.filtered(lambda m: m.product_id == self.prod_del),
-        )
